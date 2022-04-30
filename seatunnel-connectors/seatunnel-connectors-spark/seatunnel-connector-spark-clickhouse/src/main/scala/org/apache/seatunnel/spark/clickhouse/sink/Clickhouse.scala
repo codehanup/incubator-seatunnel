@@ -37,9 +37,9 @@ import org.apache.seatunnel.spark.batch.SparkBatchSink
 import org.apache.seatunnel.spark.clickhouse.Config.{BULK_SIZE, DATABASE, FIELDS, HOST, PASSWORD, RETRY, RETRY_CODES, SHARDING_KEY, SPLIT_MODE, TABLE, USERNAME}
 import org.apache.seatunnel.spark.clickhouse.sink.Clickhouse.{Shard, acceptedClickHouseSchema, distributedEngine, getClickHouseDistributedTable, getClickHouseSchema, getClickhouseConnection, getClusterShardList, getDefaultValue, getRowShard}
 import org.apache.spark.sql.{Dataset, Row}
-import ru.yandex.clickhouse.{BalancedClickhouseDataSource, ClickHouseConnectionImpl, ClickHousePreparedStatementImpl}
+import ru.yandex.clickhouse.{BalancedClickhouseDataSource, ClickHouseArray, ClickHouseConnectionImpl, ClickHousePreparedStatementImpl}
 import ru.yandex.clickhouse.except.ClickHouseException
-
+import ru.yandex.clickhouse.domain.ClickHouseDataType
 import java.nio.ByteBuffer
 import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.atomic.AtomicLong
@@ -234,7 +234,15 @@ class Clickhouse extends SparkBatchSink {
             statement.setTimestamp(index + 1, Timestamp.valueOf(value.toString))
         }
       case "Int8" | "UInt8" | "Int16" | "UInt16" | "Int32" =>
-        statement.setInt(index + 1, item.getAs[Int](fieldIndex))
+        val value = item.get(fieldIndex)
+        value match {
+          case byte: Byte =>
+            statement.setByte(index + 1, byte.byteValue())
+          case short: Short =>
+            statement.setShort(index + 1, short.shortValue())
+          case _ =>
+            statement.setInt(index + 1, value.asInstanceOf[Int])
+        }
       case "UInt32" | "UInt64" | "Int64" =>
         statement.setLong(index + 1, item.getAs[Long](fieldIndex))
       case "Float32" =>
@@ -254,7 +262,8 @@ class Clickhouse extends SparkBatchSink {
             statement.setDouble(index + 1, value.asInstanceOf[Double])
         }
       case Clickhouse.arrayPattern(_) =>
-        statement.setArray(index + 1, item.getAs[java.sql.Array](fieldIndex))
+        val value = item.getAs[Seq[Any]](fieldIndex).toArray
+        statement.setArray(index + 1, new ClickHouseArray(ClickHouseDataType.String, value))
       case "Decimal" => statement.setBigDecimal(index + 1, item.getAs[BigDecimal](fieldIndex))
       case _ => statement.setString(index + 1, item.getAs[String](fieldIndex))
     }

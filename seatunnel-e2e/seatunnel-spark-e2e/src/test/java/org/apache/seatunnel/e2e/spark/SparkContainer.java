@@ -30,9 +30,13 @@ import org.testcontainers.utility.MountableFile;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -47,13 +51,17 @@ public abstract class SparkContainer {
     public static final Network NETWORK = Network.newNetwork();
 
     protected GenericContainer<?> master;
+    private static final Path PROJECT_ROOT_PATH = Paths.get(System.getProperty("user.dir")).getParent().getParent();
     private static final String SEATUNNEL_SPARK_JAR = "seatunnel-core-spark.jar";
-    private static final String SPARK_JAR_PATH = Paths.get("/tmp", SEATUNNEL_SPARK_JAR).toString();
+    private static final String PLUGIN_MAPPING_FILE = "plugin-mapping.properties";
+    private static final String SEATUNNEL_HOME = "/tmp/spark/seatunnel";
+    private static final String SPARK_JAR_PATH = Paths.get(SEATUNNEL_HOME, "lib", SEATUNNEL_SPARK_JAR).toString();
+    private static final String CONNECTORS_PATH = Paths.get(SEATUNNEL_HOME, "connectors").toString();
 
     private static final int WAIT_SPARK_JOB_SUBMIT = 5000;
 
     @Before
-    public void before() {
+    public void before() throws InterruptedException {
         master = new GenericContainer<>(SPARK_DOCKER_IMAGE)
             .withNetwork(NETWORK)
             .withNetworkAliases("spark-master")
@@ -64,7 +72,7 @@ public abstract class SparkContainer {
         // start a worker.
 
         Startables.deepStart(Stream.of(master)).join();
-        copySeaTunnelSparkCoreJar();
+        copySeaTunnelSparkFile();
         LOG.info("Spark container started");
     }
 
@@ -84,19 +92,28 @@ public abstract class SparkContainer {
         master.copyFileToContainer(MountableFile.forHostPath(confPath), targetConfInContainer);
 
         // TODO: use start-seatunnel-spark.sh to run the spark job. Need to modified the SparkStarter can find the seatunnel-core-spark.jar.
+        // Running IT use cases under Windows requires replacing \ with /
+        String jar = SPARK_JAR_PATH.replaceAll("\\\\", "/");
+        String conf = targetConfInContainer.replaceAll("\\\\", "/");
         final List<String> command = new ArrayList<>();
         command.add("spark-submit");
         command.add("--class");
-        command.add("org.apache.seatunnel.SeatunnelSpark");
+        command.add("org.apache.seatunnel.core.spark.SeatunnelSpark");
         command.add("--name");
         command.add("SeaTunnel");
         command.add("--master");
         command.add("local");
+        command.add("--jars");
+        command.add(
+            getConnectorJarFiles()
+                .stream()
+                .map(j -> getConnectorPath(j.getName()))
+                .collect(Collectors.joining(",")));
         command.add("--deploy-mode");
         command.add("client");
-        command.add(SPARK_JAR_PATH);
+        command.add(jar);
         command.add("-c");
-        command.add(targetConfInContainer);
+        command.add(conf);
         command.add("--master");
         command.add("local");
         command.add("--deploy-mode");
@@ -110,16 +127,40 @@ public abstract class SparkContainer {
         return execResult;
     }
 
-    protected void copySeaTunnelSparkCoreJar() {
-        String currentModuleHome = System.getProperty("user.dir");
+    protected void copySeaTunnelSparkFile() {
         // copy jar to container
-        String seatunnelCoreSparkJarPath = currentModuleHome.replace("/seatunnel-e2e/seatunnel-spark-e2e", "")
+        String seatunnelCoreSparkJarPath = PROJECT_ROOT_PATH
             + "/seatunnel-core/seatunnel-core-spark/target/seatunnel-core-spark.jar";
         master.copyFileToContainer(MountableFile.forHostPath(seatunnelCoreSparkJarPath), SPARK_JAR_PATH);
+
+        // copy connectors jar
+        getConnectorJarFiles()
+            .forEach(jar ->
+                master.copyFileToContainer(
+                    MountableFile.forHostPath(jar.getAbsolutePath()),
+                    getConnectorPath(jar.getName())));
+
+        // copy plugin-mapping.properties
+        master.copyFileToContainer(
+            MountableFile.forHostPath(PROJECT_ROOT_PATH + "/seatunnel-connectors/plugin-mapping.properties"),
+            Paths.get(CONNECTORS_PATH, PLUGIN_MAPPING_FILE).toString());
     }
 
     private String getResource(String confFile) {
         return System.getProperty("user.dir") + "/src/test/resources" + confFile;
     }
 
+    private String getConnectorPath(String fileName) {
+        return Paths.get(CONNECTORS_PATH, "spark", fileName).toString();
+    }
+
+    private List<File> getConnectorJarFiles() {
+        File jars = new File(PROJECT_ROOT_PATH +
+            "/seatunnel-connectors/seatunnel-connectors-spark-dist/target/lib");
+        return Arrays.stream(
+                Objects.requireNonNull(
+                    jars.listFiles(
+                        f -> f.getName().contains("seatunnel-connector-spark"))))
+            .collect(Collectors.toList());
+    }
 }
